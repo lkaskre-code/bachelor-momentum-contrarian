@@ -1,6 +1,6 @@
 # Momentum vs. Contrarian — Backtesting Dashboard
 
-**Bachelorarbeit · Wirtschaftsuniversität Wien · Lukas Kaska**
+**Bachelorarbeit · Wirtschaftsuniversität Wien · Lukas Kressl**
 
 Empirischer Vergleich zyklischer und antizyklischer Anlagestrategien im Gold-Aktien-Portfolio (SPY + GLD, 2005–2025). Interaktives Streamlit-Dashboard mit Parameter-Sliding, Sensitivitätsanalysen, Regime-Auswertung und automatisierter Selbstvalidierung.
 
