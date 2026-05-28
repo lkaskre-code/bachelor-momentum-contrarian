@@ -210,6 +210,10 @@ def _backtest(daily_close, daily_open, weights_monthly, tc_bps, band=0.05, start
     """
     tc     = tc_bps / 10_000
     close  = daily_close[daily_close.index >= start].copy()
+    if close.empty:
+        return pd.DataFrame(
+            columns=["portfolio_value", "a1_weight", "a2_weight", "turnover", "tc_cost"]
+        )
     open_  = daily_open.reindex(close.index)
 
     # Monatliche Zielgewichte auf jeden Handelstag ausweiten und um 1 Tag nach
@@ -543,6 +547,10 @@ def _contrarian_weights_cached(daily_key, w_neutral, alpha, beta, ema_win,
 # =============================================================================
 
 def calc_metrics(port, label=""):
+    if port.empty or "portfolio_value" not in port.columns or len(port) < 2:
+        nan = float("nan")
+        return {k: nan for k in ["CAGR","Vol","Sharpe","Sortino","Schiefe","Kurtosis",
+                                  "Max DD","Worst Month","DD Dauer","Calmar","Turnover","Kosten-Drag"]} | {"label": label}
     pv  = port["portfolio_value"]
     r   = pv.pct_change().dropna()
     ny  = len(pv) / 252
@@ -845,43 +853,64 @@ class BacktestReportAnalyzer:
 
         # ── §7 Statistische Signifikanz (optional) ───────────────────────────
         if stats_dict:
-            L += ["## 7. Statistische Signifikanz (Ledoit-Wolf HAC)", ""]
-            L += [
-                "**H₀: SR(Strategie) = SR(Benchmark)  ·  zweiseitig  "
-                "·  Newey-West HAC-Varianz**", "",
-                "| Test                     | SR Strat. | SR Bench. "
-                "| t-Statistik | p-Wert | α=5% | α=10% |",
-                "|--------------------------|-----------|-----------|"
-                "-------------|--------|------|-------|",
-            ]
-            _p_m = stats_dict.get("p_Mom_vs_BM", float("nan"))
-            _p_c = stats_dict.get("p_Con_vs_BM", float("nan"))
-            _t_m = stats_dict.get("t_Mom_vs_BM", float("nan"))
-            _t_c = stats_dict.get("t_Con_vs_BM", float("nan"))
+            L += ["## 7. Statistische Signifikanz", ""]
+
+            # 7a) Ledoit-Wolf HAC Sharpe-Test
+            _p_m  = stats_dict.get("p_Mom_vs_BM",  float("nan"))
+            _p_c  = stats_dict.get("p_Con_vs_BM",  float("nan"))
+            _p_ab = stats_dict.get("p_Mom_vs_Con", float("nan"))
+            _t_m  = stats_dict.get("t_Mom_vs_BM",  float("nan"))
+            _t_c  = stats_dict.get("t_Con_vs_BM",  float("nan"))
+            _t_ab = stats_dict.get("t_Mom_vs_Con", float("nan"))
             _sr_m = stats_dict.get("SR_Momentum",   float("nan"))
             _sr_c = stats_dict.get("SR_Contrarian", float("nan"))
             _sr_b = stats_dict.get("SR_Benchmark",  float("nan"))
             L += [
-                f"| Momentum vs. Benchmark   | {_sr_m:.3f}      | {_sr_b:.3f}      "
+                "### 7a. Ledoit-Wolf HAC Sharpe-Test", "",
+                "H₀: SR(Strategie) = SR(Referenz) · zweiseitig · Newey-West HAC-Varianz", "",
+                "| Test                        | SR Strat. | SR Ref.  "
+                "| t-Statistik | p-Wert | α=5% | α=10% |",
+                "|-----------------------------|-----------|----------|"
+                "-------------|--------|------|-------|",
+                f"| Momentum vs. Benchmark      | {_sr_m:.3f}      | {_sr_b:.3f}     "
                 f"| {_t_m:+.3f}       | {_p_m:.4f} | "
                 f"{'✓' if _p_m < 0.05 else '–'}    | "
                 f"{'✓' if _p_m < 0.10 else '–'}     |",
-                f"| Contrarian vs. Benchmark | {_sr_c:.3f}      | {_sr_b:.3f}      "
+                f"| Contrarian vs. Benchmark    | {_sr_c:.3f}      | {_sr_b:.3f}     "
                 f"| {_t_c:+.3f}       | {_p_c:.4f} | "
                 f"{'✓' if _p_c < 0.05 else '–'}    | "
                 f"{'✓' if _p_c < 0.10 else '–'}     |",
+                f"| Momentum vs. Contrarian     | {_sr_m:.3f}      | {_sr_c:.3f}     "
+                f"| {_t_ab:+.3f}       | {_p_ab:.4f} | "
+                f"{'✓' if _p_ab < 0.05 else '–'}    | "
+                f"{'✓' if _p_ab < 0.10 else '–'}     |",
             ]
             L.append(
                 f"\n*Lags: {stats_dict.get('n_lags', '—')}  ·  "
                 f"T: {stats_dict.get('T', 0):,} Handelstage  ·  "
-                "Referenz: Ledoit & Wolf (2008), J. Empirical Finance*"
+                "Referenz: Ledoit & Wolf (2008), J. Empirical Finance 15(4), 850–859*"
             )
-            # Bootstrap-CIs (falls vorhanden)
+
+            # 7b) ADF-Test (falls vorhanden)
+            if "adf" in stats_dict:
+                L += ["", "### 7b. ADF-Test (Augmented Dickey-Fuller)", "",
+                      "H₀: Einheitswurzel (nicht-stationär) · Lag-Auswahl via AIC", "",
+                      "| Portfolio   | ADF-Statistik | p-Wert | Lags | Krit. 1% | Krit. 5% | H₀ abl. α=5% |",
+                      "|-------------|---------------|--------|------|----------|----------|--------------|"]
+                for _albl, _ar in stats_dict["adf"].items():
+                    L.append(
+                        f"| {_albl:<11} | {_ar['adf_stat']:>13.4f} | {_ar['p_value']:.4f} "
+                        f"| {_ar['n_lags']:>4} | {_ar['crit_1pct']:>8.3f} "
+                        f"| {_ar['crit_5pct']:>8.3f} | "
+                        f"{'✓' if _ar['p_value'] < 0.05 else '–'}            |"
+                    )
+
+            # 7c) Bootstrap-CIs + Drawdown-Signifikanz (falls vorhanden)
             if "ci_cagr_bm" in stats_dict:
                 L += [
-                    "", "**Bootstrap 5%/95%-Konfidenzintervalle "
+                    "", "### 7c. Bootstrap-Konfidenzintervalle",
                     f"({stats_dict.get('bs_n_iter', 10000):,} Iterationen "
-                    f"· Block {stats_dict.get('bs_block', 63)} HT)**", "",
+                    f"· Block {stats_dict.get('bs_block', 63)} HT)", "",
                     "| Strategie  | CAGR  5% | CAGR 95% | MaxDD  5% | MaxDD 95% |",
                     "|------------|----------|----------|-----------|-----------|",
                     f"| Benchmark  | {stats_dict['ci_cagr_bm'][0]*100:.2f} %  "
@@ -897,6 +926,60 @@ class BacktestReportAnalyzer:
                     f"| {stats_dict['ci_mdd_b'][0]*100:.1f} %   "
                     f"| {stats_dict['ci_mdd_b'][1]*100:.1f} %   |",
                 ]
+                if "dd_sig" in stats_dict:
+                    _ds = stats_dict["dd_sig"]
+                    L += ["", "**Drawdown-Signifikanz (Bootstrap-p-Wert, einseitig)**",
+                          "H₀: mdd(Strategie) ≤ mdd(Referenz) — keine Verbesserung.  ",
+                          "p-Wert = Anteil Pfade ohne DD-Verbesserung = np.mean(mdd_str ≤ mdd_ref).  ",
+                          f"· {_ds.get('n_iter', 10000):,} Bootstrap-Pfade", "",
+                          "| Test               | Verbess. (PP) | p-Wert | α=5% | α=10% |",
+                          "|--------------------|---------------|--------|------|-------|",
+                          f"| Momentum vs. BM    | +{_ds['d_obs_Mom']*100:>5.1f}        "
+                          f"| {_ds['p_Mom']:.4f} | "
+                          f"{'✓' if _ds['sig05_Mom'] else '–'}    | "
+                          f"{'✓' if _ds['sig10_Mom'] else '–'}     |",
+                          f"| Contrarian vs. BM  | +{_ds['d_obs_Con']*100:>5.1f}        "
+                          f"| {_ds['p_Con']:.4f} | "
+                          f"{'✓' if _ds['sig05_Con'] else '–'}    | "
+                          f"{'✓' if _ds['sig10_Con'] else '–'}     |",
+                          f"| Momentum vs. Con   | {_ds['d_obs_Mom_vs_Con']*100:>+5.1f}        "
+                          f"| {_ds['p_Mom_vs_Con']:.4f} | "
+                          f"{'✓' if _ds['sig05_Mom_vs_Con'] else '–'}    | "
+                          f"{'✓' if _ds['sig10_Mom_vs_Con'] else '–'}     |",
+                          ]
+
+            # 7d) Regime-Signifikanz (falls vorhanden)
+            if "regime_sig" in stats_dict:
+                _per_rows  = [r for r in stats_dict["regime_sig"]
+                              if r["Regime"] != "Alle Regime (gepoolt)"]
+                _pool_rows = [r for r in stats_dict["regime_sig"]
+                              if r["Regime"] == "Alle Regime (gepoolt)"]
+                L += ["", "### 7d. Regime-Signifikanz (t-Test + Wilcoxon)", "",
+                      "H₀: mittlere Mehrrendite (Strategie − Benchmark) = 0 je Krisenregime", "",
+                      "| Regime             | Strategie   | n  | t-Stat  | p (t-Test) | p (Wilcoxon) | Sign. α=5% |",
+                      "|--------------------|-------------|----|---------|-----------:|-------------:|:----------:|"]
+                for _rrow in _per_rows:
+                    _t_v  = f"{_rrow['t_stat']:+.3f}"    if not np.isnan(_rrow["t_stat"])    else "—"
+                    _pt_v = f"{_rrow['p_ttest']:.4f}"    if not np.isnan(_rrow["p_ttest"])   else "—"
+                    _pw_v = f"{_rrow['p_wilcoxon']:.4f}" if not np.isnan(_rrow["p_wilcoxon"]) else "—"
+                    L.append(
+                        f"| {_rrow['Regime']:<18} | {_rrow['Strategie']:<11} "
+                        f"| {_rrow['n']:>2} | {_t_v:>7} | {_pt_v:>10} | {_pw_v:>12} "
+                        f"| {'✓' if _rrow['sig05'] else '–':^10} |"
+                    )
+                if _pool_rows:
+                    L += ["", "**Gepoolter Test über alle Krisenregime (GFC + COVID + 2022)**", "",
+                          "| Strategie   | n  | t-Stat  | p (t-Test) | p (Wilcoxon) | Sign. α=5% |",
+                          "|-------------|----|---------|-----------:|-------------:|:----------:|"]
+                    for _rrow in _pool_rows:
+                        _t_v  = f"{_rrow['t_stat']:+.3f}"    if not np.isnan(_rrow["t_stat"])    else "—"
+                        _pt_v = f"{_rrow['p_ttest']:.4f}"    if not np.isnan(_rrow["p_ttest"])   else "—"
+                        _pw_v = f"{_rrow['p_wilcoxon']:.4f}" if not np.isnan(_rrow["p_wilcoxon"]) else "—"
+                        L.append(
+                            f"| {_rrow['Strategie']:<11} "
+                            f"| {_rrow['n']:>2} | {_t_v:>7} | {_pt_v:>10} | {_pw_v:>12} "
+                            f"| {'✓' if _rrow['sig05'] else '–':^10} |"
+                        )
             L.append("")
 
         # ── §3 Regime-Analyse ────────────────────────────────────────────────
@@ -968,23 +1051,36 @@ class BacktestReportAnalyzer:
 # =============================================================================
 # §7c  STATISTISCHE SIGNIFIKANZ & ROBUSTHEIT  ★ WICHTIG FÜR BACHELORARBEIT
 # =============================================================================
-# Zwei Module:
+# Fünf Funktionen:
 #
 #   sharpe_significance_lw()       Ledoit-Wolf (2008) HAC-korrigierter Sharpe-Test
+#                                  (Mom/Con vs. BM sowie Mom vs. Con direkt)
 #   block_bootstrap()              Circular Block Bootstrap (CAGR & Max DD)
 #   _block_bootstrap_cached()      @st.cache_data-Wrapper für Dashboard
-#   plot_bootstrap_maxdd_mpl()     Matplotlib KDE-Plot → bootstrap_maxdd.png
+#   plot_bootstrap_maxdd_mpl()     KDE-Plot der Bootstrap-MaxDD-Verteilungen
+#   adf_stationarity_test()        ADF-Test auf Einheitswurzeln in Rendite-Reihen
+#   drawdown_significance_bootstrap() Bootstrap-p-Wert für MaxDD-Reduktion
+#   regime_significance_test()     T-Test + Wilcoxon auf Krisenregime-Renditen
 #
 # METHODIK:
 #   Sharpe-Test: Delta-Methode + Newey-West HAC-Varianzschätzung.
 #       H₀: SR(Strategie) = SR(Benchmark) — zweiseitiger asymptotischer z-Test.
 #       Berücksichtigt Autokorrelation, Heteroskedastizität und Kreuzkorrelation.
 #       Referenz: Ledoit & Wolf (2008), J. Empirical Finance 15(4), 850–859.
+#       Neu: direkter Vergleich Momentum vs. Contrarian über denselben HAC-Test.
+#
+#   ADF-Test (Augmented Dickey-Fuller):
+#       H₀: Einheitswurzel (nicht-stationär). Lag-Auswahl via AIC.
+#       Abgelehnte H₀ → Renditen sind stationär → kein Random Walk.
 #
 #   Block Bootstrap: Circular Block Bootstrap nach Politis & Romano (1992).
 #       Blockgröße 63 HT (≈ 1 Quartal) erhält kurzfristige Autokorrelation.
 #       Konfidenzintervalle: empirische 5%- / 95%-Quantile aus 10 000 Pfaden.
 #       Speicheroptimiert: Verarbeitung in Chunks von 1 000 Pfaden.
+#       Drawdown-Signifikanz: p-Wert = Anteil Bootstrap-Pfade ohne DD-Verbesserung.
+#
+#   Regime-Signifikanz: Gepaarter t-Test + Wilcoxon-Rangsummentest
+#       auf monatliche Renditen (Strategie − Benchmark) je Krisenregime.
 # =============================================================================
 
 
@@ -996,7 +1092,8 @@ def sharpe_significance_lw(
 ) -> dict:
     """Ledoit-Wolf (2008) HAC-korrigierter Sharpe-Ratio-Signifikanztest.
 
-    Testet H₀: SR(r_a) = SR(r_bm) und H₀: SR(r_b) = SR(r_bm) unabhängig.
+    Testet H₀: SR(r_a) = SR(r_bm), H₀: SR(r_b) = SR(r_bm) und
+    H₀: SR(r_a) = SR(r_b) unabhängig (Momentum direkt vs. Contrarian).
 
     Implementierung (Ledoit & Wolf 2008, Gleichungen 9–12):
       1. Parametervektor theta = (mu_s, sigma2_s, mu_b, sigma2_b)
@@ -1071,23 +1168,26 @@ def sharpe_significance_lw(
         p_val  = 2.0 * (1.0 - norm.cdf(abs(t_stat)))
         return float(t_stat), float(p_val)
 
-    t_a, p_a = _hac_test(ra, rm)
-    t_b, p_b = _hac_test(rb, rm)
+    t_a, p_a = _hac_test(ra, rm)   # Momentum vs. Benchmark
+    t_b, p_b = _hac_test(rb, rm)   # Contrarian vs. Benchmark
+    t_ab, p_ab = _hac_test(ra, rb) # Momentum vs. Contrarian
 
     def _ann_sr(r):
         mu, sig = r.mean(), r.std(ddof=1)
         return float(mu / sig * np.sqrt(252)) if sig > 0 else np.nan
 
     return {
-        "SR_Benchmark":  _ann_sr(rm),
-        "SR_Momentum":   _ann_sr(ra),
-        "SR_Contrarian": _ann_sr(rb),
-        "t_Mom_vs_BM":   t_a,
-        "p_Mom_vs_BM":   p_a,
-        "t_Con_vs_BM":   t_b,
-        "p_Con_vs_BM":   p_b,
-        "n_lags":        n_lags,
-        "T":             T,
+        "SR_Benchmark":   _ann_sr(rm),
+        "SR_Momentum":    _ann_sr(ra),
+        "SR_Contrarian":  _ann_sr(rb),
+        "t_Mom_vs_BM":    t_a,
+        "p_Mom_vs_BM":    p_a,
+        "t_Con_vs_BM":    t_b,
+        "p_Con_vs_BM":    p_b,
+        "t_Mom_vs_Con":   t_ab,
+        "p_Mom_vs_Con":   p_ab,
+        "n_lags":         n_lags,
+        "T":              T,
     }
 
 
@@ -1170,11 +1270,111 @@ def block_bootstrap(
     }
 
 
+def block_bootstrap_independent(
+    r_bm: pd.Series,
+    r_a:  pd.Series,
+    r_b:  pd.Series,
+    n_iter:     int = 10_000,
+    block_size: int = 63,
+    seed:       int = 42,
+    chunk_size: int = 1_000,
+) -> dict:
+    """Diagnostik-Funktion: zerstört die zeitliche Kopplung zwischen Portfolios,
+    behält Randverteilungen bei. Dient zur Isolation des Pfad-Pairing-Effekts
+    auf den Drawdown-p-Wert.
+
+    Identisch zu block_bootstrap(), aber mit DREI unabhängigen idx_mat:
+    starts_rm, starts_ra, starts_rb werden separat gezogen, sodass die
+    gleichzeitige Ordnung (das Pairing) zwischen Portfolios verloren geht.
+
+    Parameter
+    ---------
+    r_bm, r_a, r_b : pd.Series  Tägliche Netto-Renditen (gemeinsamer Index)
+    n_iter          : int        Bootstrap-Iterationen (Standard: 10 000)
+    block_size      : int        Blockgröße in Handelstagen (Standard: 63)
+    seed            : int        Zufallsseed für Reproduzierbarkeit
+    chunk_size      : int        Pfade pro Verarbeitungs-Chunk (Speicherlimit)
+
+    Rückgabe
+    --------
+    dict mit CAGR/MaxDD-Arrays, 5%/95%-Konfidenzintervallen und Metadaten
+    """
+    idx = r_bm.index.intersection(r_a.index).intersection(r_b.index)
+    rm  = r_bm.reindex(idx).values
+    ra  = r_a.reindex(idx).values
+    rb  = r_b.reindex(idx).values
+    T   = len(rm)
+    ny  = T / 252.0
+    n_blocks = int(np.ceil(T / block_size))
+    rng = np.random.default_rng(seed)
+
+    cagr_bm = np.empty(n_iter);  mdd_bm = np.empty(n_iter)
+    cagr_a  = np.empty(n_iter);  mdd_a  = np.empty(n_iter)
+    cagr_b  = np.empty(n_iter);  mdd_b  = np.empty(n_iter)
+
+    def _metrics(r_mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """CAGR und Max-DD vektorisiert für (n, T)-Renditematrix."""
+        pv     = np.cumprod(1.0 + r_mat, axis=1)
+        cagr   = pv[:, -1] ** (1.0 / ny) - 1.0
+        cummax = np.maximum.accumulate(pv, axis=1)
+        mdd    = (pv / cummax - 1.0).min(axis=1)
+        return cagr, mdd
+
+    offset = 0
+    while offset < n_iter:
+        n       = min(chunk_size, n_iter - offset)
+        off_vec = np.arange(block_size, dtype=np.int32)
+
+        # Drei unabhängige idx_mat – zerstört das Pfad-Pairing
+        starts_rm = rng.integers(0, T, size=(n, n_blocks))
+        idx_rm    = (starts_rm[:, :, None] + off_vec[None, None, :]) % T
+        idx_rm    = idx_rm.reshape(n, -1)[:, :T]
+
+        starts_ra = rng.integers(0, T, size=(n, n_blocks))
+        idx_ra    = (starts_ra[:, :, None] + off_vec[None, None, :]) % T
+        idx_ra    = idx_ra.reshape(n, -1)[:, :T]
+
+        starts_rb = rng.integers(0, T, size=(n, n_blocks))
+        idx_rb    = (starts_rb[:, :, None] + off_vec[None, None, :]) % T
+        idx_rb    = idx_rb.reshape(n, -1)[:, :T]
+
+        c_rm, m_rm = _metrics(rm[idx_rm])
+        c_ra, m_ra = _metrics(ra[idx_ra])
+        c_rb, m_rb = _metrics(rb[idx_rb])
+
+        sl = slice(offset, offset + n)
+        cagr_bm[sl] = c_rm;  mdd_bm[sl] = m_rm
+        cagr_a[sl]  = c_ra;  mdd_a[sl]  = m_ra
+        cagr_b[sl]  = c_rb;  mdd_b[sl]  = m_rb
+        offset += n
+
+    def _ci(arr):
+        return float(np.percentile(arr, 5)), float(np.percentile(arr, 95))
+
+    return {
+        "cagr_bm": cagr_bm,  "mdd_bm": mdd_bm,
+        "cagr_a":  cagr_a,   "mdd_a":  mdd_a,
+        "cagr_b":  cagr_b,   "mdd_b":  mdd_b,
+        "ci_cagr_bm": _ci(cagr_bm),  "ci_mdd_bm": _ci(mdd_bm),
+        "ci_cagr_a":  _ci(cagr_a),   "ci_mdd_a":  _ci(mdd_a),
+        "ci_cagr_b":  _ci(cagr_b),   "ci_mdd_b":  _ci(mdd_b),
+        "n_iter": n_iter,  "block_size": block_size,  "T": T,
+    }
+
+
 @st.cache_data(show_spinner="Berechne Block-Bootstrap (10 000 Pfade) …")
 def _block_bootstrap_cached(cache_key, _r_bm, _r_a, _r_b,
                              n_iter=10_000, block_size=63):
     """@st.cache_data-Wrapper: Neuberechnung nur bei Parameteränderung."""
     return block_bootstrap(_r_bm, _r_a, _r_b, n_iter=n_iter, block_size=block_size)
+
+
+@st.cache_data(show_spinner="Berechne Diagnostik-Bootstrap (unabhängig, 10 000 Pfade) …")
+def _block_bootstrap_independent_cached(cache_key, _r_bm, _r_a, _r_b,
+                                        n_iter=10_000, block_size=63):
+    """@st.cache_data-Wrapper für block_bootstrap_independent()."""
+    return block_bootstrap_independent(_r_bm, _r_a, _r_b,
+                                       n_iter=n_iter, block_size=block_size)
 
 
 def plot_bootstrap_maxdd_mpl(bs: dict, save_path: str | None = None):
@@ -1247,6 +1447,184 @@ def plot_bootstrap_maxdd_mpl(bs: dict, save_path: str | None = None):
             pass  # kaleido nicht verfügbar → PNG-Export überspringen
 
     return fig
+
+
+def adf_stationarity_test(r_bm: pd.Series, r_a: pd.Series, r_b: pd.Series) -> dict:
+    """Augmented Dickey-Fuller (ADF) Test auf Portfolio-Tagesrenditen.
+
+    H₀: Rendite-Zeitreihe hat eine Einheitswurzel (nicht-stationär).
+    Wird abgelehnt → Renditen sind stationär (kein Random Walk in den Renditen).
+
+    Parameter
+    ---------
+    r_bm, r_a, r_b : pd.Series  Tägliche Netto-Renditen
+
+    Rückgabe
+    --------
+    dict mit ADF-Statistik, p-Wert und verwendeten Lags je Portfolio
+    """
+    from statsmodels.tsa.stattools import adfuller
+
+    result = {}
+    for label, r in [("Benchmark", r_bm), ("Momentum", r_a), ("Contrarian", r_b)]:
+        clean = r.dropna().values
+        adf_stat, p_val, n_lags_used, _, crit, _ = adfuller(clean, autolag="AIC")
+        result[label] = {
+            "adf_stat":  float(adf_stat),
+            "p_value":   float(p_val),
+            "n_lags":    int(n_lags_used),
+            "crit_1pct": float(crit["1%"]),
+            "crit_5pct": float(crit["5%"]),
+        }
+    return result
+
+
+def drawdown_significance_bootstrap(bs: dict, mdd_bm_obs: float, mdd_a_obs: float,
+                                    mdd_b_obs: float) -> dict:
+    """Testet Bootstrap-Signifikanz der Max-Drawdown-Reduktion (einseitig).
+
+    Vorzeichenkonvention: Max-Drawdowns sind negative Zahlen (z.B. -0.439).
+    Eine bessere Strategie hat einen weniger negativen Wert: mdd_str > mdd_bm.
+
+    Hypothesen
+    ----------
+    H₁ (Verbesserung) : mdd_strategie > mdd_benchmark  (weniger negativ)
+    H₀ (keine Verb.)  : mdd_strategie ≤ mdd_benchmark
+
+    p-Wert = Anteil der Bootstrap-Pfade, in denen H₀ gilt, d.h.
+             die Strategie KEINEN besseren (weniger negativen) Drawdown hat.
+
+    Korrekte Formel:
+        p = np.mean(bs["mdd_a"] <= bs["mdd_bm"])
+
+    Warum das die einzig richtige Richtung ist:
+        - bs["mdd_a"] ≤ bs["mdd_bm"]  ↔  Strategie schlechter/gleich wie BM
+        - Ein kleiner p-Wert bedeutet: Strategie ist im Bootstrap fast immer
+          besser → Verbesserung ist statistisch signifikant.
+
+    Parameter
+    ---------
+    bs           : dict   Ausgabe von block_bootstrap()
+    mdd_*_obs    : float  Beobachtete Max-Drawdowns (negative Zahlen, z.B. -0.439)
+
+    Rückgabe
+    --------
+    dict mit Verbesserungs-Differenz (positiv = besser), p-Werten, Signifikanz-Flags
+    """
+    # Beobachtete Verbesserung: positiv wenn Strategie BESSER als BM
+    # Beispiel: -0.265 - (-0.439) = +0.174 → Strategie reduziert DD um 17.4 PP
+    d_obs_a = mdd_a_obs - mdd_bm_obs   # positiv = Verbesserung Mom ggü. BM
+    d_obs_b = mdd_b_obs - mdd_bm_obs   # positiv = Verbesserung Con ggü. BM
+    # Mom vs. Con direkt: positiv = Momentum hat weniger negativen DD als Contrarian
+    d_obs_ab = mdd_a_obs - mdd_b_obs
+
+    # p-Wert: Anteil Bootstrap-Pfade wo Strategie NICHT besser ist (H₀ gilt)
+    # mdd_a ≤ mdd_bm  ↔  Strategie schlechter oder gleich (da beide negativ)
+    # Pairing bleibt erhalten: bs["mdd_*"] werden aus demselben idx_mat erzeugt.
+    p_a  = float(np.mean(bs["mdd_a"] <= bs["mdd_bm"]))   # H₀: Mom ≤ BM
+    p_b  = float(np.mean(bs["mdd_b"] <= bs["mdd_bm"]))   # H₀: Con ≤ BM
+    # Mom vs. Con: H₀: Momentum NICHT besser als Contrarian → mdd_a ≤ mdd_b
+    p_ab = float(np.mean(bs["mdd_a"] <= bs["mdd_b"]))
+
+    return {
+        "d_obs_Mom":        d_obs_a,    # in Dezimalform, z.B. +0.174 für +17.4 PP
+        "d_obs_Con":        d_obs_b,
+        "d_obs_Mom_vs_Con": d_obs_ab,
+        "p_Mom":            p_a,
+        "p_Con":            p_b,
+        "p_Mom_vs_Con":     p_ab,
+        "sig05_Mom":        p_a  < 0.05,
+        "sig05_Con":        p_b  < 0.05,
+        "sig05_Mom_vs_Con": p_ab < 0.05,
+        "sig10_Mom":        p_a  < 0.10,
+        "sig10_Con":        p_b  < 0.10,
+        "sig10_Mom_vs_Con": p_ab < 0.10,
+        "n_iter":           bs["n_iter"],
+    }
+
+
+def regime_significance_test(r_bm: pd.Series, r_mom: pd.Series, r_con: pd.Series) -> list[dict]:
+    """T-Test und Wilcoxon-Rangsummentest auf monatliche Renditen je Krisenregime.
+
+    Für jedes Regime werden gepaarте monatliche Renditen (Strategie − Benchmark)
+    auf Nullhypothese H₀: mittlere Mehrrendite = 0 getestet.
+
+    Parameter
+    ---------
+    r_bm, r_mom, r_con : pd.Series  Tägliche Netto-Renditen
+
+    Rückgabe
+    --------
+    list[dict] mit Testergebnissen je Regime × Strategie
+    """
+    from scipy.stats import ttest_rel, wilcoxon
+
+    REGIME_DEFS = [
+        ("GFC 2007–09",     "2007-10-01", "2009-03-31"),
+        ("COVID 2020",      "2020-02-01", "2020-04-30"),
+        ("Bärenmarkt 2022", "2022-01-01", "2022-12-31"),
+    ]
+
+    # Tägliche → monatliche Renditen (Compound)
+    def _monthly(r):
+        return (1 + r).resample("ME").prod() - 1
+
+    r_bm_m   = _monthly(r_bm)
+    r_mom_m  = _monthly(r_mom)
+    r_con_m  = _monthly(r_con)
+
+    def _run_tests(x: np.ndarray, y: np.ndarray, rname: str,
+                   strat_label: str) -> dict:
+        """Führt t-Test und Wilcoxon für ein Paar (x=Strategie, y=BM) durch."""
+        if len(x) < 3:
+            return {"Regime": rname, "Strategie": strat_label,
+                    "n": len(x), "t_stat": np.nan, "p_ttest": np.nan,
+                    "p_wilcoxon": np.nan, "sig05": False}
+        t_stat, p_t = ttest_rel(x, y)
+        try:
+            _, p_w = wilcoxon(x - y, alternative="two-sided")
+        except ValueError:
+            p_w = np.nan
+        return {
+            "Regime":      rname,
+            "Strategie":   strat_label,
+            "n":           len(x),
+            "t_stat":      float(t_stat),
+            "p_ttest":     float(p_t),
+            "p_wilcoxon":  float(p_w) if not np.isnan(p_w) else np.nan,
+            "sig05":       (p_t < 0.05) or (not np.isnan(p_w) and p_w < 0.05),
+        }
+
+    rows = []
+
+    # ── Tests je Krisenregime ─────────────────────────────────────────────────
+    for rname, rs, re in REGIME_DEFS:
+        for strat_label, r_strat_m in [("Momentum", r_mom_m), ("Contrarian", r_con_m)]:
+            sl_bm  = r_bm_m[(r_bm_m.index   >= rs) & (r_bm_m.index   <= re)]
+            sl_str = r_strat_m[(r_strat_m.index >= rs) & (r_strat_m.index <= re)]
+            common = sl_bm.index.intersection(sl_str.index)
+            x = sl_str.reindex(common).values
+            y = sl_bm.reindex(common).values
+            rows.append(_run_tests(x, y, rname, strat_label))
+
+    # ── Gepoolter Test über alle Krisenregime gemeinsam ───────────────────────
+    # Alle Krisen-Monatsrenditen werden hintereinander gehängt (Pairing bleibt
+    # erhalten: gleicher Kalendermonat, unterschiedliche Krisen).
+    # H₀: mittlere Mehrrendite = 0 über alle Krisenmonate hinweg.
+    for strat_label, r_strat_m in [("Momentum", r_mom_m), ("Contrarian", r_con_m)]:
+        pool_x, pool_y = [], []
+        for _, rs, re in REGIME_DEFS:
+            sl_bm  = r_bm_m[(r_bm_m.index   >= rs) & (r_bm_m.index   <= re)]
+            sl_str = r_strat_m[(r_strat_m.index >= rs) & (r_strat_m.index <= re)]
+            common = sl_bm.index.intersection(sl_str.index)
+            pool_x.extend(sl_str.reindex(common).values.tolist())
+            pool_y.extend(sl_bm.reindex(common).values.tolist())
+        rows.append(_run_tests(
+            np.array(pool_x), np.array(pool_y),
+            "Alle Regime (gepoolt)", strat_label,
+        ))
+
+    return rows
 
 
 # =============================================================================
@@ -2982,30 +3360,61 @@ def main():
     st.markdown("---")
     st.subheader("Statistische Signifikanz & Robustheit")
 
+    # ── 1) Ledoit-Wolf HAC Sharpe-Test ────────────────────────────────────────
     st.markdown(
-        "**Sharpe-Ratio-Signifikanztest — H₀: SR(Strategie) = SR(Benchmark)**  \n"
-        "*Ledoit & Wolf (2008) · Delta-Methode · Newey-West HAC-Varianz*"
+        "**Sharpe-Ratio-Signifikanztest (Ledoit & Wolf 2008)**  \n"
+        "*Delta-Methode · Newey-West HAC-Varianz · zweiseitig*"
     )
+    _p_m  = sig["p_Mom_vs_BM"];   _t_m  = sig["t_Mom_vs_BM"]
+    _p_c  = sig["p_Con_vs_BM"];   _t_c  = sig["t_Con_vs_BM"]
+    _p_ab = sig["p_Mom_vs_Con"];  _t_ab = sig["t_Mom_vs_Con"]
+    _sr_m = sig["SR_Momentum"];   _sr_c = sig["SR_Contrarian"]; _sr_b = sig["SR_Benchmark"]
+
     _sig_data = pd.DataFrame({
-        "SR Strat.":   [f"{sig['SR_Momentum']:.3f}",
-                        f"{sig['SR_Contrarian']:.3f}"],
-        "SR Bench.":   [f"{sig['SR_Benchmark']:.3f}",
-                        f"{sig['SR_Benchmark']:.3f}"],
-        "t-Statistik": [f"{sig['t_Mom_vs_BM']:+.3f}",
-                        f"{sig['t_Con_vs_BM']:+.3f}"],
-        "p-Wert":      [f"{sig['p_Mom_vs_BM']:.4f}",
-                        f"{sig['p_Con_vs_BM']:.4f}"],
-        "Sign. α=5%":  ["✓" if sig["p_Mom_vs_BM"] < 0.05 else "–",
-                        "✓" if sig["p_Con_vs_BM"] < 0.05 else "–"],
-        "Sign. α=10%": ["✓" if sig["p_Mom_vs_BM"] < 0.10 else "–",
-                        "✓" if sig["p_Con_vs_BM"] < 0.10 else "–"],
-    }, index=["Momentum vs. BM", "Contrarian vs. BM"])
+        "SR Strat.":   [f"{_sr_m:.3f}", f"{_sr_c:.3f}", f"{_sr_m:.3f}"],
+        "SR Ref.":     [f"{_sr_b:.3f}", f"{_sr_b:.3f}", f"{_sr_c:.3f}"],
+        "t-Statistik": [f"{_t_m:+.3f}", f"{_t_c:+.3f}", f"{_t_ab:+.3f}"],
+        "p-Wert":      [f"{_p_m:.4f}",  f"{_p_c:.4f}",  f"{_p_ab:.4f}"],
+        "Sign. α=5%":  ["✓" if _p_m  < 0.05 else "–",
+                        "✓" if _p_c  < 0.05 else "–",
+                        "✓" if _p_ab < 0.05 else "–"],
+        "Sign. α=10%": ["✓" if _p_m  < 0.10 else "–",
+                        "✓" if _p_c  < 0.10 else "–",
+                        "✓" if _p_ab < 0.10 else "–"],
+    }, index=["Momentum vs. Benchmark", "Contrarian vs. Benchmark", "Momentum vs. Contrarian"])
     st.dataframe(_sig_data, use_container_width=False)
     st.caption(
         f"Newey-West Lags: {sig['n_lags']}  ·  T = {sig['T']:,} Handelstage  ·  "
-        "zweiseitiger asymptotischer z-Test"
+        "Referenz: Ledoit & Wolf (2008), J. Empirical Finance 15(4), 850–859"
     )
 
+    # ── 2) ADF-Test auf Stationarität der Renditen ────────────────────────────
+    with st.expander("ADF-Test: Stationarität der Portfolio-Renditen", expanded=False):
+        st.caption(
+            "Augmented Dickey-Fuller (ADF) · H₀: Einheitswurzel (nicht-stationär) · "
+            "Lag-Auswahl via AIC.  "
+            "Abgelehnte H₀ → Renditereihe ist stationär → kein Random Walk in den Renditen."
+        )
+        _adf = adf_stationarity_test(r_bm_d, r_mom_d, r_con_d)
+        _adf_rows = []
+        for _lbl, _res in _adf.items():
+            _adf_rows.append({
+                "Portfolio":    _lbl,
+                "ADF-Statistik": f"{_res['adf_stat']:.4f}",
+                "p-Wert":       f"{_res['p_value']:.4f}",
+                "Lags":         _res["n_lags"],
+                "Kritisch 1%":  f"{_res['crit_1pct']:.3f}",
+                "Kritisch 5%":  f"{_res['crit_5pct']:.3f}",
+                "H₀ abl. α=5%": "✓" if _res["p_value"] < 0.05 else "–",
+            })
+        st.dataframe(pd.DataFrame(_adf_rows).set_index("Portfolio"), use_container_width=False)
+        st.caption(
+            "ADF-Statistik < kritischer Wert → H₀ abgelehnt (stationär).  "
+            "Alle Portfolio-Renditen sollten stationär sein (p < 0.05), "
+            "da es sich um Differenzen der Log-Preise handelt."
+        )
+
+    # ── 3) Bootstrap-Robustheit inkl. Drawdown-Signifikanz ───────────────────
     with st.expander(
         "Bootstrap-Robustheit (Sequence of Returns Risk · 10 000 Iterationen · Block 63 HT)",
         expanded=False,
@@ -3042,6 +3451,136 @@ def main():
             }, index=["Benchmark", "Momentum", "Contrarian"])
             st.dataframe(_ci_df, use_container_width=False)
 
+            # Drawdown-Signifikanz via Bootstrap
+            _mdd_bm_obs = ((p_bm["portfolio_value"]  / p_bm["portfolio_value"].cummax()) - 1).min()
+            _mdd_mom_obs = ((p_mom["portfolio_value"] / p_mom["portfolio_value"].cummax()) - 1).min()
+            _mdd_con_obs = ((p_con["portfolio_value"] / p_con["portfolio_value"].cummax()) - 1).min()
+            _dd_sig = drawdown_significance_bootstrap(
+                _bs, _mdd_bm_obs, _mdd_mom_obs, _mdd_con_obs
+            )
+            st.markdown("**Drawdown-Signifikanz (Bootstrap-p-Wert)**")
+            st.caption(
+                "H₀: mdd(Strategie) ≤ mdd(Referenz) — keine Verbesserung.  "
+                "Drawdowns sind negative Zahlen; eine bessere Strategie hat einen weniger negativen Wert.  "
+                "p-Wert = Anteil der Bootstrap-Pfade, in denen die Strategie NICHT besser war.  "
+                "Kleiner p-Wert → signifikante DD-Reduktion."
+            )
+            _dd_df = pd.DataFrame({
+                "Beob. DD Ref.":   [f"{_mdd_bm_obs*100:.1f} %",
+                                    f"{_mdd_bm_obs*100:.1f} %",
+                                    f"{_mdd_con_obs*100:.1f} %"],
+                "Beob. DD Str.":   [f"{_mdd_mom_obs*100:.1f} %",
+                                    f"{_mdd_con_obs*100:.1f} %",
+                                    f"{_mdd_mom_obs*100:.1f} %"],
+                "Verbess. (PP)":   [f"+{_dd_sig['d_obs_Mom']*100:.1f}",
+                                    f"+{_dd_sig['d_obs_Con']*100:.1f}",
+                                    f"{_dd_sig['d_obs_Mom_vs_Con']*100:+.1f}"],
+                "p-Wert (BS)":     [f"{_dd_sig['p_Mom']:.4f}",
+                                    f"{_dd_sig['p_Con']:.4f}",
+                                    f"{_dd_sig['p_Mom_vs_Con']:.4f}"],
+                "Sign. α=5%":      ["✓" if _dd_sig["sig05_Mom"]        else "–",
+                                    "✓" if _dd_sig["sig05_Con"]        else "–",
+                                    "✓" if _dd_sig["sig05_Mom_vs_Con"] else "–"],
+                "Sign. α=10%":     ["✓" if _dd_sig["sig10_Mom"]        else "–",
+                                    "✓" if _dd_sig["sig10_Con"]        else "–",
+                                    "✓" if _dd_sig["sig10_Mom_vs_Con"] else "–"],
+            }, index=["Momentum vs. BM", "Contrarian vs. BM", "Momentum vs. Con"])
+            st.dataframe(_dd_df, use_container_width=False)
+
+            # ── Diagnostik: Drawdown-Signifikanz ohne Pfad-Pairing ──────────────
+            st.markdown("---")
+            st.markdown("**Diagnostik: Drawdown-Signifikanz ohne Pfad-Pairing**")
+            st.caption(
+                "Kontrolltest: Die drei Portfolios werden mit *unabhängigen* Block-Starts "
+                "resampelt (drei separate idx_mat statt einem gemeinsamen).  "
+                "Das zerstört die zeitliche Kopplung zwischen Portfolios; "
+                "die Randverteilungen (Marginals) bleiben erhalten.  "
+                "Steigt der p-Wert deutlich, ist das Pairing entscheidend für die Signifikanz."
+            )
+            _bs_ind_cache_key = _bs_cache_key + "_ind"
+            _bs_ind = (st.session_state.get("bs_ind_result")
+                       if st.session_state.get("bs_ind_key") == _bs_ind_cache_key else None)
+
+            if st.button("Diagnostik-Bootstrap starten (ca. 20–60 s)",
+                         key="btn_bootstrap_independent"):
+                _bs_ind_res = _block_bootstrap_independent_cached(
+                    _bs_ind_cache_key, r_bm_d, r_mom_d, r_con_d,
+                    n_iter=10_000, block_size=63,
+                )
+                st.session_state["bs_ind_result"] = _bs_ind_res
+                st.session_state["bs_ind_key"]    = _bs_ind_cache_key
+                _bs_ind = _bs_ind_res
+
+            if _bs_ind is not None:
+                _dd_sig_ind = drawdown_significance_bootstrap(
+                    _bs_ind, _mdd_bm_obs, _mdd_mom_obs, _mdd_con_obs
+                )
+                _dd_ind_df = pd.DataFrame({
+                    "Beob. DD Ref.":   [f"{_mdd_bm_obs*100:.1f} %",
+                                        f"{_mdd_bm_obs*100:.1f} %",
+                                        f"{_mdd_con_obs*100:.1f} %"],
+                    "Beob. DD Str.":   [f"{_mdd_mom_obs*100:.1f} %",
+                                        f"{_mdd_con_obs*100:.1f} %",
+                                        f"{_mdd_mom_obs*100:.1f} %"],
+                    "Verbess. (PP)":   [f"+{_dd_sig_ind['d_obs_Mom']*100:.1f}",
+                                        f"+{_dd_sig_ind['d_obs_Con']*100:.1f}",
+                                        f"{_dd_sig_ind['d_obs_Mom_vs_Con']*100:+.1f}"],
+                    "p-Wert (BS)":     [f"{_dd_sig_ind['p_Mom']:.4f}",
+                                        f"{_dd_sig_ind['p_Con']:.4f}",
+                                        f"{_dd_sig_ind['p_Mom_vs_Con']:.4f}"],
+                    "Sign. α=5%":      ["✓" if _dd_sig_ind["sig05_Mom"]        else "–",
+                                        "✓" if _dd_sig_ind["sig05_Con"]        else "–",
+                                        "✓" if _dd_sig_ind["sig05_Mom_vs_Con"] else "–"],
+                    "Sign. α=10%":     ["✓" if _dd_sig_ind["sig10_Mom"]        else "–",
+                                        "✓" if _dd_sig_ind["sig10_Con"]        else "–",
+                                        "✓" if _dd_sig_ind["sig10_Mom_vs_Con"] else "–"],
+                }, index=["Momentum vs. BM", "Contrarian vs. BM", "Momentum vs. Con"])
+                st.dataframe(_dd_ind_df, use_container_width=False)
+
+                # Vergleichstabelle: gepaart vs. unabhängig (alle drei Paare)
+                st.markdown("**Vergleich: gepaart vs. unabhängig**")
+                _p_mom_paired  = _dd_sig["p_Mom"]
+                _p_con_paired  = _dd_sig["p_Con"]
+                _p_ab_paired   = _dd_sig["p_Mom_vs_Con"]
+                _p_mom_ind     = _dd_sig_ind["p_Mom"]
+                _p_con_ind     = _dd_sig_ind["p_Con"]
+                _p_ab_ind      = _dd_sig_ind["p_Mom_vs_Con"]
+                _cmp_df = pd.DataFrame({
+                    "p-Wert (gepaart)":    [f"{_p_mom_paired:.4f}",
+                                            f"{_p_con_paired:.4f}",
+                                            f"{_p_ab_paired:.4f}"],
+                    "p-Wert (unabhängig)": [f"{_p_mom_ind:.4f}",
+                                            f"{_p_con_ind:.4f}",
+                                            f"{_p_ab_ind:.4f}"],
+                    "Δ":                   [f"{(_p_mom_ind - _p_mom_paired):+.4f}",
+                                            f"{(_p_con_ind - _p_con_paired):+.4f}",
+                                            f"{(_p_ab_ind  - _p_ab_paired):+.4f}"],
+                }, index=["Momentum vs. BM", "Contrarian vs. BM", "Momentum vs. Con"])
+                st.dataframe(_cmp_df, use_container_width=False)
+
+                # Interpretative Beschriftung (konditionell auf alle drei Paare)
+                _n_rising = sum([
+                    _p_mom_ind > _p_mom_paired,
+                    _p_con_ind > _p_con_paired,
+                    _p_ab_ind  > _p_ab_paired,
+                ])
+                if _n_rising == 3:
+                    st.caption(
+                        "Alle drei p-Werte steigen ohne Pairing → das gemeinsame Resampling "
+                        "(Pfad-Pairing) trägt konsistent zur DD-Signifikanz bei.  "
+                        "Die Randverteilungen allein erklären den Effekt nicht vollständig."
+                    )
+                elif _n_rising == 0:
+                    st.caption(
+                        "Alle drei p-Werte sinken oder bleiben stabil ohne Pairing → "
+                        "das Pairing hat kaum Einfluss; die Randverteilungen dominieren."
+                    )
+                else:
+                    st.caption(
+                        f"{_n_rising} von 3 p-Werten steigen ohne Pairing → "
+                        "der Pairing-Effekt wirkt asymmetrisch über die drei Vergleichspaare."
+                    )
+
             import os as _os
             _png_path = _os.path.join(
                 _os.path.dirname(_os.path.abspath(__file__)),
@@ -3049,6 +3588,59 @@ def main():
             )
             _fig_bs = plot_bootstrap_maxdd_mpl(_bs, save_path=_png_path)
             st.plotly_chart(_fig_bs, use_container_width=True)
+
+    # ── 4) Regime-Signifikanz (t-Test + Wilcoxon) ─────────────────────────────
+    with st.expander("Regime-Signifikanz: t-Test + Wilcoxon auf Krisenrenditen", expanded=False):
+        st.caption(
+            "Gepaarter t-Test und Wilcoxon-Rangsummentest auf monatliche Renditen "
+            "innerhalb der drei Krisenregime sowie über alle Krisen gepoolт.  "
+            "H₀: mittlere Mehrrendite (Strategie − Benchmark) = 0."
+        )
+        _regime_rows = regime_significance_test(r_bm_d, r_mom_d, r_con_d)
+        _reg_df = pd.DataFrame(_regime_rows)
+
+        # Einzelne Krisenregime
+        _reg_per = _reg_df[_reg_df["Regime"] != "Alle Regime (gepoolt)"].copy()
+        _reg_per_display = pd.DataFrame({
+            "Regime":       _reg_per["Regime"],
+            "Strategie":    _reg_per["Strategie"],
+            "n (Monate)":   _reg_per["n"],
+            "t-Statistik":  _reg_per["t_stat"].apply(
+                lambda v: f"{v:+.3f}" if not np.isnan(v) else "—"),
+            "p (t-Test)":   _reg_per["p_ttest"].apply(
+                lambda v: f"{v:.4f}" if not np.isnan(v) else "—"),
+            "p (Wilcoxon)": _reg_per["p_wilcoxon"].apply(
+                lambda v: f"{v:.4f}" if not np.isnan(v) else "—"),
+            "Sign. α=5%":   _reg_per["sig05"].map({True: "✓", False: "–"}),
+        })
+        st.dataframe(_reg_per_display.set_index(["Regime", "Strategie"]),
+                     use_container_width=False)
+        st.caption(
+            "Signifikanz α=5% ist erfüllt, wenn t-Test ODER Wilcoxon p < 0.05.  "
+            "Kurze Krisenregime haben wenige Beobachtungen (n) → geringe Power."
+        )
+
+        # Gepoolter Test über alle Krisen
+        st.markdown("**Gepoolter Test: alle Krisenregime kombiniert**")
+        st.caption(
+            "Alle Krisenmonate (GFC + COVID + 2022) werden hintereinander gehängt "
+            "und gemeinsam getestet.  "
+            "Höhere Stichprobenzahl → höhere Power; testet Konsistenz über Krisen hinweg."
+        )
+        _reg_pool = _reg_df[_reg_df["Regime"] == "Alle Regime (gepoolt)"].copy()
+        _reg_pool_display = pd.DataFrame({
+            "Strategie":    _reg_pool["Strategie"],
+            "n (Monate)":   _reg_pool["n"],
+            "t-Statistik":  _reg_pool["t_stat"].apply(
+                lambda v: f"{v:+.3f}" if not np.isnan(v) else "—"),
+            "p (t-Test)":   _reg_pool["p_ttest"].apply(
+                lambda v: f"{v:.4f}" if not np.isnan(v) else "—"),
+            "p (Wilcoxon)": _reg_pool["p_wilcoxon"].apply(
+                lambda v: f"{v:.4f}" if not np.isnan(v) else "—"),
+            "Sign. α=5%":   _reg_pool["sig05"].map({True: "✓", False: "–"}),
+        })
+        st.dataframe(_reg_pool_display.set_index("Strategie"),
+                     use_container_width=False)
 
     # ── ALLOKATION ────────────────────────────────────────────────────────────
     with st.expander("Allokationshistorie", expanded=False):
@@ -3127,7 +3719,7 @@ def main():
     # ── KI-ANALYSE EXPORT ─────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("Analyse Export")
-    st.caption("Alle Backtestdaten als strukturierter Text — direkt in Claude / ChatGPT einfügen")
+    st.caption("Alle Backtestdaten als strukturierter Text")
 
     if st.button("Bericht generieren", type="primary"):
 
@@ -3227,7 +3819,17 @@ def main():
         # ── Markdown-Bericht generieren ───────────────────────────────────────
         # Statistik-Dict für Markdown-Export zusammenstellen
         _stats_export = {**sig}
+
+        # ADF-Test immer berechnen
+        _stats_export["adf"] = adf_stationarity_test(r_bm_d, r_mom_d, r_con_d)
+
+        # Regime-Signifikanz immer berechnen
+        _stats_export["regime_sig"] = regime_significance_test(r_bm_d, r_mom_d, r_con_d)
+
         if _bs is not None:
+            _mdd_bm_obs_exp = ((p_bm["portfolio_value"]  / p_bm["portfolio_value"].cummax()) - 1).min()
+            _mdd_mom_obs_exp = ((p_mom["portfolio_value"] / p_mom["portfolio_value"].cummax()) - 1).min()
+            _mdd_con_obs_exp = ((p_con["portfolio_value"] / p_con["portfolio_value"].cummax()) - 1).min()
             _stats_export.update({
                 "ci_cagr_bm": _bs["ci_cagr_bm"],
                 "ci_cagr_a":  _bs["ci_cagr_a"],
@@ -3237,6 +3839,9 @@ def main():
                 "ci_mdd_b":   _bs["ci_mdd_b"],
                 "bs_n_iter":  _bs["n_iter"],
                 "bs_block":   _bs["block_size"],
+                "dd_sig":     drawdown_significance_bootstrap(
+                    _bs, _mdd_bm_obs_exp, _mdd_mom_obs_exp, _mdd_con_obs_exp
+                ),
             })
 
         report_text = analyzer.to_markdown(
