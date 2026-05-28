@@ -54,6 +54,43 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.stats import gaussian_kde, norm
 
+# ── yfinance: SQLite-Cache deaktivieren (verhindert "database is locked" auf Cloud) ──
+try:
+    yf.set_tz_cache_handler(None)          # yfinance < 0.2.50
+except AttributeError:
+    pass
+try:
+    import yfinance.cache as _yfc_cache
+    _yfc_cache._TZ_CACHE = None            # yfinance 0.2.50+
+except Exception:
+    pass
+
+
+def _yf_download(tickers, max_retries: int = 4, **kwargs) -> pd.DataFrame:
+    """yfinance-Download mit Exponential-Backoff bei Rate-Limit oder DB-Lock.
+
+    Versucht bis zu max_retries-mal; Wartezeit: 2s → 4s → 8s → …
+    Gibt leeren DataFrame zurück wenn alle Versuche scheitern.
+    """
+    import time
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            df = yf.download(tickers, progress=False, **kwargs)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return df
+        except Exception as exc:          # Rate-Limit, DB-Lock, Netzwerk …
+            last_exc = exc
+        wait = 2 ** (attempt + 1)        # 2s, 4s, 8s, 16s
+        time.sleep(wait)
+    # Letzter Versuch ohne Schlaf — wirft ggf. Exception durch
+    try:
+        return yf.download(tickers, progress=False, **kwargs)
+    except Exception as exc:
+        raise RuntimeError(
+            f"yfinance-Download fehlgeschlagen nach {max_retries} Versuchen: {exc}"
+        ) from exc
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  SEITEN-KONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,10 +158,10 @@ def load_prices(ticker1="SPY", ticker2="GLD"):
     Beide Serien nutzen auto_adjust=True, damit Close/Open konsistent skaliert sind
     und intraday/overnight Renditen korrekt addieren.
     """
-    raw = yf.download(
+    raw = _yf_download(
         [ticker1, ticker2],
         start="2002-01-01", end="2025-12-31",
-        auto_adjust=True, progress=False,
+        auto_adjust=True,
     )
     cols  = [ticker1, ticker2]
     close = raw["Close"][cols].dropna().copy()
@@ -149,8 +186,8 @@ def load_t1_prices(ticker1="SPY"):
 
     Lösung: ticker1 separat laden → volle Warmup-Periode ab 2002 verfügbar.
     """
-    raw = yf.download(ticker1, start="2002-01-01", end="2025-12-31",
-                      auto_adjust=True, progress=False)
+    raw = _yf_download(ticker1, start="2002-01-01", end="2025-12-31",
+                       auto_adjust=True)
     close = raw["Close"]
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
@@ -3241,7 +3278,25 @@ def main():
     # Hier werden die Strategiegewichte und Backtests berechnet.
     # Alle schweren Berechnungen sind gecacht → nur bei Parameteränderung neu.
     with st.spinner("Berechne Strategien …"):
-        daily_close, daily_open = load_prices(ticker1, ticker2)
+        try:
+            daily_close, daily_open = load_prices(ticker1, ticker2)
+        except Exception as _dl_exc:
+            st.error(
+                f"⚠️ **Marktdaten konnten nicht geladen werden.**  \n"
+                f"Yahoo Finance ist möglicherweise nicht erreichbar "
+                f"(Rate-Limit oder Netzwerkproblem).  \n"
+                f"Bitte Seite neu laden. Fehler: `{_dl_exc}`"
+            )
+            st.stop()
+
+        if daily_close.empty or len(daily_close) < 100:
+            st.error(
+                "⚠️ **Yahoo Finance hat keine Daten zurückgegeben.**  \n"
+                "Bitte kurz warten und die Seite neu laden "
+                "(häufig ein temporäres Rate-Limit)."
+            )
+            st.stop()
+
         m_prices = get_monthly(daily_close)
 
         # Cache-Schlüssel: enthält alle relevanten Parameter inkl. Asset-Ticker
